@@ -2,7 +2,7 @@ use phf::phf_map;
 use std::fmt::{Display, Formatter, Result as FmtResult};
 use std::str::FromStr;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 struct RecordType {
     value: u16,
 }
@@ -111,6 +111,10 @@ impl RecordType {
         "TA" => 32768,
         "DLV" => 32769,
     };
+
+    pub fn new(value: u16) -> Self {
+        Self { value }
+    }
 
     pub fn to_str(self) -> &'static str {
         match self.value {
@@ -222,12 +226,16 @@ impl Display for RecordType {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 struct RecordClass {
     value: u16,
 }
 
 impl RecordClass {
+    pub fn new(value: u16) -> Self {
+        Self { value }
+    }
+
     fn to_str(&self) -> &'static str {
         match self.value {
             0 => "Reserved",
@@ -252,22 +260,34 @@ impl Display for RecordClass {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 struct Question {
-    name: String,
+    name: Vec<u8>,
     type_: RecordType,
     class: RecordClass,
 }
 
 impl Question {
-    fn parse<R: Read>(bytes: &mut R) -> Result<Self, ParseError> {
-        unimplemented!()
+    fn parse(bytes: &[u8], cursor: &mut usize) -> Result<Self, ParseError> {
+        let name = parse_name(bytes, cursor)?;
+
+        if *cursor + 4 > bytes.len() {
+            return Err(ParseError::Truncated);
+        }
+
+        let word = |index: usize| ((bytes[index] as u16) << 8) | (bytes[index + 1] as u16);
+
+        let type_ = RecordType::new(word(*cursor));
+        let class = RecordClass::new(word(*cursor + 2));
+        *cursor += 4;
+
+        Ok(Question { name, type_, class })
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 struct Record {
-    name: String,
+    name: Vec<u8>,
     type_: RecordType,
     class: RecordClass,
     ttl: u32,
@@ -275,15 +295,114 @@ struct Record {
 }
 
 impl Record {
-    fn parse<R: Read>(bytes: &mut R) -> Result<Self, ParseError> {
-        unimplemented!()
+    fn parse(bytes: &[u8], cursor: &mut usize) -> Result<Self, ParseError> {
+        let name = parse_name(bytes, cursor)?;
+
+        if *cursor + 10 > bytes.len() {
+            return Err(ParseError::Truncated);
+        }
+
+        let word = |index: usize| ((bytes[index] as u16) << 8) | (bytes[index + 1] as u16);
+        let dword = |index: usize| {
+            ((bytes[index] as u32) << 24)
+                | ((bytes[index + 1] as u32) << 16)
+                | ((bytes[index + 2] as u32) << 8)
+                | (bytes[index + 3] as u32)
+        };
+
+        let type_ = RecordType::new(word(*cursor));
+        let class = RecordClass::new(word(*cursor + 2));
+        let ttl = dword(*cursor + 4);
+        let rdata_len = word(*cursor + 8);
+        *cursor += 10;
+
+        if *cursor + (rdata_len as usize) > bytes.len() {
+            return Err(ParseError::Truncated);
+        }
+
+        let rdata = bytes[*cursor..*cursor + (rdata_len as usize)].to_vec();
+
+        *cursor += 10 + (rdata_len as usize);
+
+        Ok(Record {
+            name,
+            type_,
+            class,
+            ttl,
+            rdata,
+        })
     }
 }
 
+fn parse_name(bytes: &[u8], cursor: &mut usize) -> Result<Vec<u8>, ParseError> {
+    let mut name = Vec::with_capacity(64);
+
+    loop {
+        if *cursor >= bytes.len() {
+            return Err(ParseError::Truncated);
+        }
+
+        let byte = bytes[*cursor];
+
+        if byte == 0 {
+            *cursor += 1;
+            return Ok(name);
+        }
+
+        match byte >> 6 {
+            0 => {
+                if !name.is_empty() {
+                    name.push(b'.');
+                }
+
+                if *cursor + 1 + (byte as usize) > bytes.len() {
+                    return Err(ParseError::Truncated);
+                }
+
+                name.extend(&bytes[(*cursor + 1)..(*cursor + 1 + (byte as usize))]);
+                *cursor += 1 + (byte as usize);
+            }
+            3 => {
+                if *cursor + 2 > bytes.len() {
+                    return Err(ParseError::Truncated);
+                }
+
+                let pointer = (((byte ^ 0b11000000) as u16) << 8) | (bytes[*cursor + 1] as u16);
+
+                // Only expand compressed labels pointing backwards in the message, in order to
+                // prevent infinite recursion
+                if (pointer as usize) >= *cursor {
+                    return Err(ParseError::Invalid);
+                }
+
+                let tail = {
+                    let mut pointer_cursor = pointer as usize;
+                    parse_name(bytes, &mut pointer_cursor)
+                }?;
+
+                *cursor += 2;
+
+                name.extend(&tail);
+
+                return Ok(name);
+            }
+            _ => return Err(ParseError::Invalid),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq)]
 struct Flags {
     value: u16,
 }
 
+impl Flags {
+    fn new(value: u16) -> Self {
+        Flags { value }
+    }
+}
+
+#[derive(Debug, PartialEq)]
 struct Message {
     id: u16,
     flags: Flags,
@@ -293,19 +412,21 @@ struct Message {
     additional_rrs: Vec<Record>,
 }
 
-// FIXME
-enum ParseError {}
-
-use std::io::Read;
+#[derive(Debug)]
+enum ParseError {
+    Truncated,
+    Extra,
+    Invalid,
+}
 
 impl Message {
-    fn parse<R: Read>(bytes: &mut R) -> Result<Self, ParseError> {
-        let mut header_bytes = [0u8; 12];
-        bytes.read_exact(&mut header_bytes).unwrap(); // FIXME
+    fn parse(bytes: &[u8]) -> Result<Self, ParseError> {
+        if bytes.len() < 12 {
+            return Err(ParseError::Truncated);
+        }
 
-        let header_word = |index: usize| {
-            ((header_bytes[2 * index] as u16) << 8) + (header_bytes[2 * index + 1] as u16)
-        };
+        let header_word =
+            |index: usize| ((bytes[2 * index] as u16) << 8) | (bytes[2 * index + 1] as u16);
 
         let id = header_word(0);
         let flags = header_word(1);
@@ -314,14 +435,15 @@ impl Message {
         let num_authority_rrs = header_word(4);
         let num_additional_rrs = header_word(5);
 
-        fn parse_many<R: Read, T>(
+        fn parse_many<T>(
             num: u16,
-            bytes: &mut R,
-            parse: fn(&mut R) -> Result<T, ParseError>,
+            bytes: &[u8],
+            cursor: &mut usize,
+            parse: fn(&[u8], &mut usize) -> Result<T, ParseError>,
         ) -> Result<Vec<T>, ParseError> {
             (0..num).fold(Ok(vec![]), |result, _| {
                 result.and_then(|mut vec| {
-                    parse(bytes).map(|t| {
+                    parse(bytes, cursor).map(|t| {
                         vec.push(t);
                         vec
                     })
@@ -329,13 +451,78 @@ impl Message {
             })
         }
 
-        Ok(Message {
+        let mut cursor = 12;
+
+        let message = Message {
             id,
             flags: Flags { value: flags },
-            questions: parse_many(num_questions, bytes, Question::parse)?,
-            answers: parse_many(num_answers, bytes, Record::parse)?,
-            authority_rrs: parse_many(num_authority_rrs, bytes, Record::parse)?,
-            additional_rrs: parse_many(num_additional_rrs, bytes, Record::parse)?,
-        })
+            questions: parse_many(num_questions, bytes, &mut cursor, Question::parse)?,
+            answers: parse_many(num_answers, bytes, &mut cursor, Record::parse)?,
+            authority_rrs: parse_many(num_authority_rrs, bytes, &mut cursor, Record::parse)?,
+            additional_rrs: parse_many(num_additional_rrs, bytes, &mut cursor, Record::parse)?,
+        };
+
+        if cursor < bytes.len() {
+            return Err(ParseError::Extra);
+        }
+
+        Ok(message)
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use crate::protocol::{Flags, Message, Question, Record, RecordClass, RecordType};
+    use std::str::FromStr;
+
+    #[test]
+    fn test_message_parse() {
+        let bytes = [
+            0x0f, 0xd5, 0x01, 0x20, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x06, 0x67,
+            0x6f, 0x6f, 0x67, 0x6c, 0x65, 0x03, 0x63, 0x6f, 0x6d, 0x00, 0x00, 0x01, 0x00, 0x01,
+            0x00, 0x00, 0x29, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0c, 0x00, 0x0a, 0x00,
+            0x08, 0x6d, 0x77, 0x39, 0x88, 0x8e, 0x98, 0x42, 0x6c,
+        ];
+
+        let bytes = [
+            0xd1, 0xd1, 0x01, 0x20, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x06, 0x67,
+            0x6f, 0x6f, 0x67, 0x6c, 0x65, 0x03, 0x63, 0x6f, 0x6d, 0x00, 0x00, 0x01, 0x00, 0x01,
+            0x00, 0x00, 0x29, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0c, 0x00, 0x0a, 0x00,
+            0x08, 0x95, 0x4e, 0xe6, 0x5a, 0xc9, 0xaa, 0x3e, 0xb5,
+        ];
+
+        let bytes = [
+            0x41, 0xde, 0x01, 0x20, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x04, 0x78,
+            0x6b, 0x63, 0x64, 0x03, 0x63, 0x6f, 0x6d, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00,
+            0x29, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0c, 0x00, 0x0a, 0x00, 0x08, 0x8f,
+            0x2d, 0xe3, 0x7b, 0x74, 0x5d, 0x6b, 0x4d,
+        ];
+
+        let message = Message::parse(&bytes).unwrap();
+        println!("{:?}", message);
+
+        assert_eq!(
+            message,
+            Message {
+                id: 0x41de,
+                flags: Flags::new(0x0120),
+                questions: vec![Question {
+                    name: "xkcd.com".as_bytes().to_vec(),
+                    type_: RecordType::from_str("A").unwrap(),
+                    class: RecordClass::new(0x01),
+                }],
+                answers: vec![],
+                authority_rrs: vec![],
+                additional_rrs: vec![Record {
+                    name: vec![],
+                    type_: RecordType::from_str("OPT").unwrap(),
+                    class: RecordClass::new(0x1000),
+                    ttl: 0,
+                    rdata: vec![
+                        0x00, 0x0a, 0x00, 0x08, 0x8f, 0x2d, 0xe3, 0x7b, 0x74, 0x5d, 0x6b, 0x4d
+                    ]
+                }],
+            }
+        );
     }
 }

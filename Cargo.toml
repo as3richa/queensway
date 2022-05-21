@@ -1,0 +1,8 @@
+[package]
+name = "queensway"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+regex = "1"
+phf = { version = "0.10", features = ["macros"] }

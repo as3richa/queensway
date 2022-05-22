@@ -1,8 +1,10 @@
 use phf::phf_map;
+
 use std::fmt::{Display, Formatter, Result as FmtResult};
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::str::FromStr;
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct RecordType {
     value: u16,
 }
@@ -112,7 +114,11 @@ impl RecordType {
         "DLV" => 32769,
     };
 
-    pub fn new(value: u16) -> Self {
+    const A: Self = Self::new(1);
+    const AAAA: Self = Self::new(28);
+    const CNAME: Self = Self::new(5);
+
+    pub const fn new(value: u16) -> Self {
         Self { value }
     }
 }
@@ -385,6 +391,101 @@ impl Display for Ttl {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+enum Rdata {
+    A { ip: Ipv4Addr },
+    Aaaa { ip: Ipv6Addr },
+    Cname { name: Name },
+    Other { data: Vec<u8> },
+}
+
+impl Rdata {
+    fn parse(type_: RecordType, bytes: &[u8], cursor: &mut usize) -> Result<Self, ParseError> {
+        if *cursor + 2 > bytes.len() {
+            println!("wtf lmao");
+            return Err(ParseError::Truncated);
+        }
+
+        let len = ((bytes[*cursor] as usize) << 8) | (bytes[*cursor + 1] as usize);
+        *cursor += 2;
+
+        if *cursor + len > bytes.len() {
+            println!("{} {} {}", *cursor, len, type_);
+            return Err(ParseError::Truncated);
+        }
+
+        let rdata = match type_ {
+            RecordType::A => {
+                if len != 4 {
+                    return Err(ParseError::Invalid);
+                }
+
+                let ip = Ipv4Addr::new(
+                    bytes[*cursor],
+                    bytes[*cursor + 1],
+                    bytes[*cursor + 2],
+                    bytes[*cursor + 3],
+                );
+                Self::A { ip }
+            }
+            RecordType::AAAA => {
+                if len != 16 {
+                    return Err(ParseError::Invalid);
+                }
+
+                let mut raw_ip = [0; 16];
+                raw_ip[0..16].clone_from_slice(&bytes[*cursor..*cursor + 16]);
+                let ip = Ipv6Addr::from(raw_ip);
+                Self::Aaaa { ip }
+            }
+            RecordType::CNAME => {
+                let mut name_cursor = *cursor;
+                let name = Name::parse(&bytes[0..*cursor + len], &mut name_cursor)?;
+
+                if name_cursor < *cursor + len {
+                    return Err(ParseError::Extra);
+                }
+
+                Self::Cname { name }
+            }
+            _ => {
+                let data = bytes[*cursor..*cursor + len].to_vec();
+                Self::Other { data }
+            }
+        };
+
+        *cursor += len;
+        Ok(rdata)
+    }
+}
+
+impl Display for Rdata {
+    fn fmt(&self, fmt: &mut Formatter) -> FmtResult {
+        match self {
+            Self::A { ip } => {
+                write!(fmt, "{}", ip)?;
+            }
+            Self::Aaaa { ip } => {
+                write!(fmt, "{}", ip)?;
+            }
+            Self::Cname { name } => {
+                write!(fmt, "{}", name)?;
+            }
+            Self::Other { data } => {
+                for &byte in data.iter() {
+                    if byte.is_ascii() && !byte.is_ascii_control() {
+                        write!(fmt, "{}", byte as char)?;
+                    } else {
+                        write!(fmt, "\\x{:02x}", byte)?;
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
 struct Question {
     name: Name,
     type_: RecordType,
@@ -426,18 +527,19 @@ pub struct Record {
     type_: RecordType,
     class: RecordClass,
     ttl: Ttl,
-    rdata: Vec<u8>,
+    rdata: Rdata,
 }
 
 impl Record {
     fn parse(bytes: &[u8], cursor: &mut usize) -> Result<Self, ParseError> {
         let name = Name::parse(bytes, cursor)?;
 
-        if *cursor + 10 > bytes.len() {
+        if *cursor + 8 > bytes.len() {
             return Err(ParseError::Truncated);
         }
 
         let word = |index: usize| ((bytes[index] as u16) << 8) | (bytes[index + 1] as u16);
+
         let dword = |index: usize| {
             ((bytes[index] as u32) << 24)
                 | ((bytes[index + 1] as u32) << 16)
@@ -448,16 +550,9 @@ impl Record {
         let type_ = RecordType::new(word(*cursor));
         let class = RecordClass::new(word(*cursor + 2));
         let ttl = Ttl::new(dword(*cursor + 4));
-        let rdata_len = word(*cursor + 8);
-        *cursor += 10;
+        *cursor += 8;
 
-        if *cursor + (rdata_len as usize) > bytes.len() {
-            return Err(ParseError::Truncated);
-        }
-
-        let rdata = bytes[*cursor..*cursor + (rdata_len as usize)].to_vec();
-
-        *cursor += rdata_len as usize;
+        let rdata = Rdata::parse(type_, bytes, cursor)?;
 
         Ok(Record {
             name,
@@ -474,7 +569,7 @@ impl Display for Record {
         write!(
             fmt,
             "Name: {}  Type: {}  Class:  {}  TTL: {}  Record data: {}",
-            self.name, self.type_, self.class, self.ttl, &"FIXME"
+            self.name, self.type_, self.class, self.ttl, self.rdata
         )?;
         Ok(())
     }
@@ -493,7 +588,7 @@ impl Flags {
 
 impl Display for Flags {
     fn fmt(&self, fmt: &mut Formatter) -> FmtResult {
-        let type_ = if self.value >> 15 == 1 {
+        let type_ = if self.value >> 15 == 0 {
             "Query"
         } else {
             "Reply"
@@ -580,18 +675,21 @@ impl Display for Message {
 
         macro_rules! section {
             ($fmt:expr, $name:expr, $items:expr) => {
-                writeln!($fmt, "{}:", $name)?;
-
-                for item in $items {
-                    writeln!($fmt, "  {}", item)?;
+                if $items.len() == 0 {
+                    writeln!($fmt, "{}: None", $name)?;
+                } else {
+                    writeln!($fmt, "{}:", $name)?;
+                    for item in $items {
+                        writeln!($fmt, "  {}", item)?;
+                    }
                 }
             };
         }
 
         section!(fmt, "Questions", &self.questions);
-        section!(fmt, "Answers", &self.questions);
-        section!(fmt, "Authority records", &self.questions);
-        section!(fmt, "Additional records", &self.questions);
+        section!(fmt, "Answers", &self.answers);
+        section!(fmt, "Authority records", &self.authority_rrs);
+        section!(fmt, "Additional records", &self.additional_rrs);
 
         Ok(())
     }
@@ -599,7 +697,9 @@ impl Display for Message {
 
 #[cfg(test)]
 mod test {
-    use crate::protocol::{Flags, Message, Name, Question, Record, RecordClass, RecordType, Ttl};
+    use crate::protocol::{
+        Flags, Message, Name, Question, Rdata, Record, RecordClass, RecordType, Ttl,
+    };
     use std::str::FromStr;
 
     const XKCD_MESSAGE: [u8; 49] = [
@@ -630,9 +730,7 @@ mod test {
                     type_: RecordType::from_str("OPT").unwrap(),
                     class: RecordClass::new(0x1000),
                     ttl: Ttl::new(0),
-                    rdata: vec![
-                        0x00, 0x0a, 0x00, 0x08, 0x8f, 0x2d, 0xe3, 0x7b, 0x74, 0x5d, 0x6b, 0x4d
-                    ]
+                    rdata: Rdata::Other { data: vec![] },
                 }],
             }
         );

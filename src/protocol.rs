@@ -115,9 +115,11 @@ impl RecordType {
     pub fn new(value: u16) -> Self {
         Self { value }
     }
+}
 
-    pub fn to_str(self) -> &'static str {
-        match self.value {
+impl Display for RecordType {
+    fn fmt(&self, fmt: &mut Formatter) -> FmtResult {
+        let name = match self.value {
             0 => "Reserved",
             1 => "A",
             2 => "NS",
@@ -215,13 +217,8 @@ impl RecordType {
             32770..=65279 => "Unassigned",
             65280..=65534 => "Private use",
             65535 => "Reserved",
-        }
-    }
-}
-
-impl Display for RecordType {
-    fn fmt(&self, fmt: &mut Formatter) -> FmtResult {
-        write!(fmt, "{} ({})", self.to_str(), self.value)?;
+        };
+        write!(fmt, "{} ({})", name, self.value)?;
         Ok(())
     }
 }
@@ -232,12 +229,14 @@ struct RecordClass {
 }
 
 impl RecordClass {
-    pub fn new(value: u16) -> Self {
+    fn new(value: u16) -> Self {
         Self { value }
     }
+}
 
-    fn to_str(&self) -> &'static str {
-        match self.value {
+impl Display for RecordClass {
+    fn fmt(&self, fmt: &mut Formatter) -> FmtResult {
+        let memo = match self.value {
             0 => "Reserved",
             1 => "Internet (IN)",
             2 => "Unassigned",
@@ -249,27 +248,152 @@ impl RecordClass {
             256..=65279 => "Unassigned",
             65280..=65534 => "Reserved for Private Use",
             65535 => "Reserved",
+        };
+        write!(fmt, "{} ({})", memo, self.value)?;
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct Name {
+    name: Vec<u8>,
+}
+
+impl Name {
+    // Individual domain names must be parsed from the full payload of the DNS message, in order to
+    // support compressed labels referencing other names in the message
+    fn parse(bytes: &[u8], cursor: &mut usize) -> Result<Self, ParseError> {
+        let mut name = Vec::with_capacity(64);
+
+        loop {
+            if *cursor >= bytes.len() {
+                return Err(ParseError::Truncated);
+            }
+
+            let byte = bytes[*cursor];
+
+            if byte == 0 {
+                *cursor += 1;
+                return Ok(Self { name });
+            }
+
+            match byte >> 6 {
+                0 => {
+                    if !name.is_empty() {
+                        name.push(b'.');
+                    }
+
+                    if *cursor + 1 + (byte as usize) > bytes.len() {
+                        return Err(ParseError::Truncated);
+                    }
+
+                    name.extend(&bytes[(*cursor + 1)..(*cursor + 1 + (byte as usize))]);
+                    *cursor += 1 + (byte as usize);
+                }
+                3 => {
+                    if *cursor + 2 > bytes.len() {
+                        return Err(ParseError::Truncated);
+                    }
+
+                    let pointer = (((byte ^ 0b11000000) as u16) << 8) | (bytes[*cursor + 1] as u16);
+
+                    // Only expand compressed labels pointing backwards in the message, in order to
+                    // prevent infinite recursion
+                    if (pointer as usize) >= *cursor {
+                        return Err(ParseError::Invalid);
+                    }
+
+                    let tail = {
+                        let mut pointer_cursor = pointer as usize;
+                        Self::parse(bytes, &mut pointer_cursor)
+                    }?;
+
+                    *cursor += 2;
+
+                    name.extend(&tail.name);
+
+                    return Ok(Self { name });
+                }
+                _ => return Err(ParseError::Invalid),
+            }
         }
     }
 }
 
-impl Display for RecordClass {
+impl FromStr for Name {
+    type Err = ();
+
+    fn from_str(name: &str) -> Result<Self, Self::Err> {
+        Ok(Self {
+            name: name.as_bytes().to_vec(),
+        })
+    }
+}
+
+impl Display for Name {
     fn fmt(&self, fmt: &mut Formatter) -> FmtResult {
-        write!(fmt, "{} ({})", self.to_str(), self.value)?;
+        for &byte in self.name.iter() {
+            if byte.is_ascii() && !byte.is_ascii_control() {
+                write!(fmt, "{}", byte as char)?;
+            } else {
+                write!(fmt, "\\x{:02x}", byte)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct Ttl {
+    seconds: u32,
+}
+
+impl Ttl {
+    fn new(seconds: u32) -> Self {
+        Self { seconds }
+    }
+}
+
+impl Display for Ttl {
+    fn fmt(&self, fmt: &mut Formatter) -> FmtResult {
+        let mut seconds = self.seconds;
+
+        let days = seconds / 86400;
+        seconds %= 86400;
+        if days != 0 {
+            write!(fmt, "{}d", days)?;
+        }
+
+        let hours = seconds / 3600;
+        seconds %= 3600;
+        if hours != 0 {
+            write!(fmt, "{}h", hours)?;
+        }
+
+        let minutes = seconds / 60;
+        seconds %= 60;
+        if minutes != 0 {
+            write!(fmt, "{}m", minutes)?;
+        }
+
+        if seconds != 0 || days + hours + minutes == 0 {
+            write!(fmt, "{}s", seconds)?;
+        }
+
         Ok(())
     }
 }
 
 #[derive(Clone, Debug, PartialEq)]
 struct Question {
-    name: Vec<u8>,
+    name: Name,
     type_: RecordType,
     class: RecordClass,
 }
 
 impl Question {
     fn parse(bytes: &[u8], cursor: &mut usize) -> Result<Self, ParseError> {
-        let name = parse_name(bytes, cursor)?;
+        let name = Name::parse(bytes, cursor)?;
 
         if *cursor + 4 > bytes.len() {
             return Err(ParseError::Truncated);
@@ -285,18 +409,29 @@ impl Question {
     }
 }
 
+impl Display for Question {
+    fn fmt(&self, fmt: &mut Formatter) -> FmtResult {
+        write!(
+            fmt,
+            "Name: {}  Type: {}  Class:  {}",
+            self.name, self.type_, self.class
+        )?;
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Record {
-    name: Vec<u8>,
+    name: Name,
     type_: RecordType,
     class: RecordClass,
-    ttl: u32,
+    ttl: Ttl,
     rdata: Vec<u8>,
 }
 
 impl Record {
     fn parse(bytes: &[u8], cursor: &mut usize) -> Result<Self, ParseError> {
-        let name = parse_name(bytes, cursor)?;
+        let name = Name::parse(bytes, cursor)?;
 
         if *cursor + 10 > bytes.len() {
             return Err(ParseError::Truncated);
@@ -312,7 +447,7 @@ impl Record {
 
         let type_ = RecordType::new(word(*cursor));
         let class = RecordClass::new(word(*cursor + 2));
-        let ttl = dword(*cursor + 4);
+        let ttl = Ttl::new(dword(*cursor + 4));
         let rdata_len = word(*cursor + 8);
         *cursor += 10;
 
@@ -334,60 +469,14 @@ impl Record {
     }
 }
 
-fn parse_name(bytes: &[u8], cursor: &mut usize) -> Result<Vec<u8>, ParseError> {
-    let mut name = Vec::with_capacity(64);
-
-    loop {
-        if *cursor >= bytes.len() {
-            return Err(ParseError::Truncated);
-        }
-
-        let byte = bytes[*cursor];
-
-        if byte == 0 {
-            *cursor += 1;
-            return Ok(name);
-        }
-
-        match byte >> 6 {
-            0 => {
-                if !name.is_empty() {
-                    name.push(b'.');
-                }
-
-                if *cursor + 1 + (byte as usize) > bytes.len() {
-                    return Err(ParseError::Truncated);
-                }
-
-                name.extend(&bytes[(*cursor + 1)..(*cursor + 1 + (byte as usize))]);
-                *cursor += 1 + (byte as usize);
-            }
-            3 => {
-                if *cursor + 2 > bytes.len() {
-                    return Err(ParseError::Truncated);
-                }
-
-                let pointer = (((byte ^ 0b11000000) as u16) << 8) | (bytes[*cursor + 1] as u16);
-
-                // Only expand compressed labels pointing backwards in the message, in order to
-                // prevent infinite recursion
-                if (pointer as usize) >= *cursor {
-                    return Err(ParseError::Invalid);
-                }
-
-                let tail = {
-                    let mut pointer_cursor = pointer as usize;
-                    parse_name(bytes, &mut pointer_cursor)
-                }?;
-
-                *cursor += 2;
-
-                name.extend(&tail);
-
-                return Ok(name);
-            }
-            _ => return Err(ParseError::Invalid),
-        }
+impl Display for Record {
+    fn fmt(&self, fmt: &mut Formatter) -> FmtResult {
+        write!(
+            fmt,
+            "Name: {}  Type: {}  Class:  {}  TTL: {}  Record data: {}",
+            self.name, self.type_, self.class, self.ttl, &"FIXME"
+        )?;
+        Ok(())
     }
 }
 
@@ -399,6 +488,21 @@ struct Flags {
 impl Flags {
     fn new(value: u16) -> Self {
         Flags { value }
+    }
+}
+
+impl Display for Flags {
+    fn fmt(&self, fmt: &mut Formatter) -> FmtResult {
+        let type_ = if self.value >> 15 == 1 {
+            "Query"
+        } else {
+            "Reply"
+        };
+
+        // FIXME
+        write!(fmt, "Type: {}  Raw: {:04x}", type_, self.value)?;
+
+        Ok(())
     }
 }
 
@@ -455,7 +559,7 @@ impl Message {
 
         let message = Message {
             id,
-            flags: Flags { value: flags },
+            flags: Flags::new(flags),
             questions: parse_many(num_questions, bytes, &mut cursor, Question::parse)?,
             answers: parse_many(num_answers, bytes, &mut cursor, Record::parse)?,
             authority_rrs: parse_many(num_authority_rrs, bytes, &mut cursor, Record::parse)?,
@@ -470,9 +574,32 @@ impl Message {
     }
 }
 
+impl Display for Message {
+    fn fmt(&self, fmt: &mut Formatter) -> FmtResult {
+        writeln!(fmt, "ID: {}\nFlags: {}", self.id, self.flags)?;
+
+        macro_rules! section {
+            ($fmt:expr, $name:expr, $items:expr) => {
+                writeln!($fmt, "{}:", $name)?;
+
+                for item in $items {
+                    writeln!($fmt, "  {}", item)?;
+                }
+            };
+        }
+
+        section!(fmt, "Questions", &self.questions);
+        section!(fmt, "Answers", &self.questions);
+        section!(fmt, "Authority records", &self.questions);
+        section!(fmt, "Additional records", &self.questions);
+
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod test {
-    use crate::protocol::{Flags, Message, Question, Record, RecordClass, RecordType};
+    use crate::protocol::{Flags, Message, Name, Question, Record, RecordClass, RecordType, Ttl};
     use std::str::FromStr;
 
     const XKCD_MESSAGE: [u8; 49] = [
@@ -492,17 +619,17 @@ mod test {
                 id: 0x41de,
                 flags: Flags::new(0x0120),
                 questions: vec![Question {
-                    name: "xkcd.com".as_bytes().to_vec(),
+                    name: Name::from_str("xkcd.com").unwrap(),
                     type_: RecordType::from_str("A").unwrap(),
                     class: RecordClass::new(0x01),
                 }],
                 answers: vec![],
                 authority_rrs: vec![],
                 additional_rrs: vec![Record {
-                    name: vec![],
+                    name: Name::from_str("").unwrap(),
                     type_: RecordType::from_str("OPT").unwrap(),
                     class: RecordClass::new(0x1000),
-                    ttl: 0,
+                    ttl: Ttl::new(0),
                     rdata: vec![
                         0x00, 0x0a, 0x00, 0x08, 0x8f, 0x2d, 0xe3, 0x7b, 0x74, 0x5d, 0x6b, 0x4d
                     ]

@@ -1,10 +1,8 @@
-mod config;
 mod matcher;
 mod protocol;
 mod server;
 
-use config::Config;
-use server::Server;
+use server::{Config, Server};
 
 #[tokio::main]
 async fn main() {

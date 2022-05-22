@@ -322,7 +322,7 @@ impl Record {
 
         let rdata = bytes[*cursor..*cursor + (rdata_len as usize)].to_vec();
 
-        *cursor += 10 + (rdata_len as usize);
+        *cursor += rdata_len as usize;
 
         Ok(Record {
             name,

@@ -4,7 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-phf = { version = "0.10", features = ["macros"] }
+env_logger = "0.9"
+log = "0.4"
 rayon = "1.5"
 regex = "1"
-tokio = { version = "1.18.2", features = ["full"] }
+tokio = { version = "1.18.2", features = ["full", "sync"] }

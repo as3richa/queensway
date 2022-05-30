@@ -633,6 +633,22 @@ pub enum ParseError {
     Invalid,
 }
 
+use std::error::Error;
+
+impl Display for ParseError {
+    fn fmt(&self, fmt: &mut Formatter) -> FmtResult {
+        let message = match self {
+            Self::Truncated => "DNS message is incomplete",
+            Self::Extra => "DNS message contains extraneous data",
+            Self::Invalid => "DNS message is malformed",
+        };
+        write!(fmt, "{}", message)?;
+        Ok(())
+    }
+}
+
+impl Error for ParseError {}
+
 impl Message {
     pub fn parse(bytes: &[u8]) -> Result<Self, ParseError> {
         if bytes.len() < 12 {

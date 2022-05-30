@@ -1,5 +1,3 @@
-use phf::phf_map;
-
 use std::fmt::{Display, Formatter, Result as FmtResult};
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::str::FromStr;
@@ -9,114 +7,13 @@ struct RecordType {
     value: u16,
 }
 
-impl FromStr for RecordType {
-    type Err = ();
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        Self::TYPE_NAMES
-            .get(value)
-            .map(|&value| Ok(Self { value }))
-            .unwrap_or(Err(()))
-    }
-}
-
 impl RecordType {
-    const TYPE_NAMES: phf::Map<&'static str, u16> = phf_map! {
-        "A" => 1,
-        "NS" => 2,
-        "MD" => 3,
-        "MF" => 4,
-        "CNAME" => 5,
-        "SOA" => 6,
-        "MB" => 7,
-        "MG" => 8,
-        "MR" => 9,
-        "NULL" => 10,
-        "WKS" => 11,
-        "PTR" => 12,
-        "HINFO" => 13,
-        "MINFO" => 14,
-        "MX" => 15,
-        "TXT" => 16,
-        "RP" => 17,
-        "AFSDB" => 18,
-        "X25" => 19,
-        "ISDN" => 20,
-        "RT" => 21,
-        "NSAP" => 22,
-        "NSAP-PTR" => 23,
-        "SIG" => 24,
-        "KEY" => 25,
-        "PX" => 26,
-        "GPOS" => 27,
-        "AAAA" => 28,
-        "LOC" => 29,
-        "NXT" => 30,
-        "EID" => 31,
-        "NIMLOC" => 32,
-        "SRV" => 33,
-        "ATMA" => 34,
-        "NAPTR" => 35,
-        "KX" => 36,
-        "CERT" => 37,
-        "A6" => 38,
-        "DNAME" => 39,
-        "SINK" => 40,
-        "OPT" => 41,
-        "APL" => 42,
-        "DS" => 43,
-        "SSHFP" => 44,
-        "IPSECKEY" => 45,
-        "RRSIG" => 46,
-        "NSEC" => 47,
-        "DNSKEY" => 48,
-        "DHCID" => 49,
-        "NSEC3" => 50,
-        "NSEC3PARAM" => 51,
-        "TLSA" => 52,
-        "SMIMEA" => 53,
-        "Unassigned" => 54,
-        "HIP" => 55,
-        "NINFO" => 56,
-        "RKEY" => 57,
-        "TALINK" => 58,
-        "CDS" => 59,
-        "CDNSKEY" => 60,
-        "OPENPGPKEY" => 61,
-        "CSYNC" => 62,
-        "ZONEMD" => 63,
-        "SVCB" => 64,
-        "HTTPS" => 65,
-        "SPF" => 99,
-        "UINFO" => 100,
-        "UID" => 101,
-        "GID" => 102,
-        "UNSPEC" => 103,
-        "NID" => 104,
-        "L32" => 105,
-        "L64" => 106,
-        "LP" => 107,
-        "EUI48" => 108,
-        "EUI64" => 109,
-        "TKEY" => 249,
-        "TSIG" => 250,
-        "IXFR" => 251,
-        "AXFR" => 252,
-        "MAILB" => 253,
-        "MAILA" => 254,
-        "*" => 255,
-        "URI" => 256,
-        "CAA" => 257,
-        "AVC" => 258,
-        "DOA" => 259,
-        "AMTRELAY" => 260,
-        "TA" => 32768,
-        "DLV" => 32769,
-    };
-
     const A: Self = Self::new(1);
     const AAAA: Self = Self::new(28);
     const CNAME: Self = Self::new(5);
+
+    #[cfg(test)]
+    const OPT: Self = Self::new(41);
 
     pub const fn new(value: u16) -> Self {
         Self { value }
@@ -401,7 +298,6 @@ enum Rdata {
 impl Rdata {
     fn parse(type_: RecordType, bytes: &[u8], cursor: &mut usize) -> Result<Self, ParseError> {
         if *cursor + 2 > bytes.len() {
-            println!("wtf lmao");
             return Err(ParseError::Truncated);
         }
 
@@ -409,7 +305,6 @@ impl Rdata {
         *cursor += 2;
 
         if *cursor + len > bytes.len() {
-            println!("{} {} {}", *cursor, len, type_);
             return Err(ParseError::Truncated);
         }
 
@@ -575,27 +470,147 @@ impl Display for Record {
     }
 }
 
+struct ResponseCode {
+    value: u16,
+}
+
+impl ResponseCode {
+    const fn new(value: u16) -> Self {
+        Self { value }
+    }
+}
+
+impl Display for ResponseCode {
+    fn fmt(&self, fmt: &mut Formatter) -> FmtResult {
+        let name = match self.value {
+            0 => "NoError",
+            1 => "FormErr",
+            2 => "ServFail",
+            3 => "NXDomain",
+            4 => "NotImp",
+            5 => "Refused",
+            6 => "YXDomain",
+            7 => "YXRRSet",
+            8 => "NXRRSet",
+            9 => "NotAuth",
+            10 => "NotZone",
+            11 => "DSOTYPENI",
+            _ => "Unassigned",
+        };
+        write!(fmt, "{} ({})", name, self.value)?;
+        Ok(())
+    }
+}
+
+struct OpCode {
+    value: u16,
+}
+
+impl OpCode {
+    const fn new(value: u16) -> Self {
+        Self { value }
+    }
+}
+
+impl Display for OpCode {
+    fn fmt(&self, fmt: &mut Formatter) -> FmtResult {
+        let name = match self.value {
+            0 => "Query",
+            1 => "IQuery",
+            2 => "Status",
+            4 => "Notify",
+            5 => "Update",
+            6 => "DNS Stateful Operations",
+            _ => "Unassigned",
+        };
+        write!(fmt, "{} ({})", name, self.value)?;
+        Ok(())
+    }
+}
+
 #[derive(Debug, PartialEq)]
 struct Flags {
     value: u16,
 }
 
 impl Flags {
-    fn new(value: u16) -> Self {
+    pub fn new(value: u16) -> Self {
         Flags { value }
+    }
+
+    pub fn from_parts(
+        is_reply: bool,
+        opcode: OpCode,
+        is_authoritative_answer: bool,
+        is_truncated: bool,
+        recursion_desired: bool,
+        recursion_available: bool,
+        response_code: ResponseCode,
+    ) -> Self {
+        let value = (if is_reply { 1 << 15 } else { 0 })
+            | (opcode.value << 11)
+            | (if is_authoritative_answer { 1 << 10 } else { 0 })
+            | (if is_truncated { 1 << 9 } else { 0 })
+            | (if recursion_desired { 1 << 8 } else { 0 })
+            | (if recursion_available { 1 << 7 } else { 0 })
+            | (response_code.value);
+
+        Self { value }
+    }
+
+    pub fn is_reply(&self) -> bool {
+        self.value >> 15 == 1
+    }
+
+    pub fn opcode(&self) -> OpCode {
+        OpCode::new((self.value >> 11) & 0b1111)
+    }
+
+    pub fn is_authoritative_answer(&self) -> bool {
+        (self.value >> 10) & 0b1 == 1
+    }
+
+    pub fn is_truncated(&self) -> bool {
+        (self.value >> 9) & 0b1 == 1
+    }
+
+    pub fn recursion_desired(&self) -> bool {
+        (self.value >> 8) & 0b1 == 1
+    }
+
+    pub fn recursion_available(&self) -> bool {
+        (self.value >> 7) & 0b1 == 1
+    }
+
+    pub fn response_code(&self) -> ResponseCode {
+        ResponseCode::new(self.value & 0b1111)
     }
 }
 
 impl Display for Flags {
     fn fmt(&self, fmt: &mut Formatter) -> FmtResult {
-        let type_ = if self.value >> 15 == 0 {
-            "Query"
-        } else {
-            "Reply"
-        };
+        write!(
+            fmt,
+            "Type: {}  Opcode: {}  Status: {}  ",
+            if self.is_reply() { "Reply" } else { "Query" },
+            self.opcode(),
+            self.response_code(),
+        )?;
 
-        // FIXME
-        write!(fmt, "Type: {}  Raw: {:04x}", type_, self.value)?;
+        let flags = [
+            (self.is_authoritative_answer(), "AA"),
+            (self.is_truncated(), "TC"),
+            (self.recursion_desired(), "RD"),
+            (self.recursion_available(), "RA"),
+        ];
+
+        for (is_set, name) in flags {
+            if is_set {
+                write!(fmt, "{}  ", name)?;
+            }
+        }
+
+        write!(fmt, "({})", self.value)?;
 
         Ok(())
     }
@@ -671,13 +686,11 @@ impl Message {
 
 impl Display for Message {
     fn fmt(&self, fmt: &mut Formatter) -> FmtResult {
-        writeln!(fmt, "ID: {}\nFlags: {}", self.id, self.flags)?;
+        writeln!(fmt, "ID: {}\nFlags:\n  {}", self.id, self.flags)?;
 
         macro_rules! section {
             ($fmt:expr, $name:expr, $items:expr) => {
-                if $items.len() == 0 {
-                    writeln!($fmt, "{}: None", $name)?;
-                } else {
+                if $items.len() != 0 {
                     writeln!($fmt, "{}:", $name)?;
                     for item in $items {
                         writeln!($fmt, "  {}", item)?;
@@ -720,14 +733,14 @@ mod test {
                 flags: Flags::new(0x0120),
                 questions: vec![Question {
                     name: Name::from_str("xkcd.com").unwrap(),
-                    type_: RecordType::from_str("A").unwrap(),
+                    type_: RecordType::A,
                     class: RecordClass::new(0x01),
                 }],
                 answers: vec![],
                 authority_rrs: vec![],
                 additional_rrs: vec![Record {
                     name: Name::from_str("").unwrap(),
-                    type_: RecordType::from_str("OPT").unwrap(),
+                    type_: RecordType::OPT,
                     class: RecordClass::new(0x1000),
                     ttl: Ttl::new(0),
                     rdata: Rdata::Other { data: vec![] },

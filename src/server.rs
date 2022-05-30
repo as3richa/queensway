@@ -107,7 +107,6 @@ impl Server {
 
                 let message = Message::parse(&buf[0..len]).unwrap(); // FIXME
                 println!("{}", message);
-
                 Ok::<(), IoError>(()) // FIXME: ???
             });
         }
